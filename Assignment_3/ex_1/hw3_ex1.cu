@@ -6,6 +6,7 @@
 
 #define BLOCK_SIZE  16
 #define HEADER_SIZE 138
+#define BLOCK_SIZE_SH 18
 
 typedef unsigned char BYTE;
 
@@ -180,6 +181,21 @@ __global__ void gpu_grayscale(int width, int height, float *image, float *image_
     // TO-DO #4.2 /////////////////////////////////////////////
     // Implement the GPU version of the grayscale conversion //
     ///////////////////////////////////////////////////////////
+
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (col < width && row < height) {
+        const int output_offset = row * width;
+        const int input_offset = output_offset * 3;
+
+        const float *pixel = &image[input_offset + col * 3];
+
+        image_out[output_offset + col] = pixel[0] * 0.0722f + // B
+                                         pixel[1] * 0.7152f + // G
+                                         pixel[2] * 0.2126f;  // R
+    }
+
 }
 
 /**
@@ -208,14 +224,20 @@ float cpu_applyFilter(float *image, int stride, float *matrix, int filter_dim)
  */
 __device__ float gpu_applyFilter(float *image, int stride, float *matrix, int filter_dim)
 {
-    ////////////////
-    // TO-DO #5.2 ////////////////////////////////////////////////
-    // Implement the GPU version of cpu_applyFilter()           //
-    //                                                          //
-    // Does it make sense to have a separate gpu_applyFilter()? //
-    //////////////////////////////////////////////////////////////
+    float pixel = 0.0f;
     
-    return 0.0f;
+    for (int h = 0; h < filter_dim; h++)
+    {
+        const int offset        = h * stride;
+        const int offset_kernel = h * filter_dim;
+        
+        for (int w = 0; w < filter_dim; w++)
+        {
+            pixel += image[offset + w] * matrix[offset_kernel + w];
+        }
+    }
+    
+    return pixel;
 }
 
 /**
@@ -245,20 +267,51 @@ void cpu_gaussian(int width, int height, float *image, float *image_out)
  */
 __global__ void gpu_gaussian(int width, int height, float *image, float *image_out)
 {
+    __shared__ float sh_block[BLOCK_SIZE_SH * BLOCK_SIZE_SH];
+
     float gaussian[9] = { 1.0f / 16.0f, 2.0f / 16.0f, 1.0f / 16.0f,
                           2.0f / 16.0f, 4.0f / 16.0f, 2.0f / 16.0f,
                           1.0f / 16.0f, 2.0f / 16.0f, 1.0f / 16.0f };
     
-    int index_x = blockIdx.x * blockDim.x + threadIdx.x;
-    int index_y = blockIdx.y * blockDim.y + threadIdx.y;
-    
+    const int index_x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int index_y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int block_idx = threadIdx.y * BLOCK_SIZE_SH + threadIdx.x;
+    const int offset_t = index_y * width + index_x;
+
+    if (index_x < width && index_y < height) {
+        sh_block[block_idx] = image[offset_t];
+    }
+
     if (index_x < (width - 2) && index_y < (height - 2))
     {
-        int offset_t = index_y * width + index_x;
-        int offset   = (index_y + 1) * width + (index_x + 1);
-        
-        image_out[offset] = gpu_applyFilter(&image[offset_t],
-                                            width, gaussian, 3);
+        //If we are the "border" threads on the block, transfer ghost pixels
+        if (threadIdx.x == (BLOCK_SIZE - 1) && threadIdx.y < BLOCK_SIZE) {
+            //Copy two more columns into shared memory
+            int ghost_idx = block_idx + 1;
+            sh_block[ghost_idx] = image[offset_t + 1];
+
+            ghost_idx += 1;
+            sh_block[ghost_idx] = image[offset_t + 2];
+        }
+        if (threadIdx.y == (BLOCK_SIZE - 1) && threadIdx.x < BLOCK_SIZE) {
+            int ghost_idx = block_idx + BLOCK_SIZE_SH;
+            sh_block[ghost_idx] = image[offset_t + width];
+
+            ghost_idx += BLOCK_SIZE_SH;
+            sh_block[ghost_idx] = image[offset_t + 2 * width];
+            //Finally, the bottom-right corner
+            if (threadIdx.x == (BLOCK_SIZE - 1)) {
+                ghost_idx = (threadIdx.y + 1) * BLOCK_SIZE_SH + threadIdx.x + 1;
+                sh_block[ghost_idx] =     image[offset_t + width + 1];
+                sh_block[ghost_idx + 1] = image[offset_t + width + 2];
+                sh_block[ghost_idx + BLOCK_SIZE_SH] = image[offset_t + 2 * width + 1];
+                sh_block[ghost_idx + BLOCK_SIZE_SH + 1] = image[offset_t + 2 * width + 2];
+            }
+        }
+        __syncthreads();
+        const int offset   = (index_y + 1) * width + (index_x + 1);
+        image_out[offset] = gpu_applyFilter(&sh_block[block_idx],
+                                            BLOCK_SIZE_SH, gaussian, 3);
     }
 }
 
@@ -296,10 +349,62 @@ void cpu_sobel(int width, int height, float *image, float *image_out)
  */
 __global__ void gpu_sobel(int width, int height, float *image, float *image_out)
 {
-    ////////////////
-    // TO-DO #6.1 /////////////////////////////////////
-    // Implement the GPU version of the Sobel filter //
-    ///////////////////////////////////////////////////
+    __shared__ float sh_block[BLOCK_SIZE_SH * BLOCK_SIZE_SH];
+
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    float sobel_x[9] = { 1.0f,  0.0f, -1.0f,
+                         2.0f,  0.0f, -2.0f,
+                         1.0f,  0.0f, -1.0f };
+    float sobel_y[9] = { 1.0f,  2.0f,  1.0f,
+                         0.0f,  0.0f,  0.0f,
+                        -1.0f, -2.0f, -1.0f };
+
+    const int offset_t  = row * width + col;
+    const int offset  = (row + 1) * width;
+
+    const int block_idx = threadIdx.y * BLOCK_SIZE + threadIdx.x;
+
+    if (row < height && col < width) {
+        sh_block[block_idx] = image[offset_t];
+    }
+
+    if (row < (height - 2) && col < (width - 2)) {
+        //If we are the "border" threads on the block, transfer ghost pixels
+        if (threadIdx.x == (BLOCK_SIZE - 1) && threadIdx.y < BLOCK_SIZE) {
+            //Copy two more columns into shared memory
+            int ghost_idx = block_idx + 1;
+            sh_block[ghost_idx] = image[offset_t + 1];
+
+            ghost_idx += 1;
+            sh_block[ghost_idx] = image[offset_t + 2];
+        }
+        if (threadIdx.y == (BLOCK_SIZE - 1) && threadIdx.x < BLOCK_SIZE) {
+            int ghost_idx = block_idx + BLOCK_SIZE_SH;
+            sh_block[ghost_idx] = image[offset_t + width];
+
+            ghost_idx += BLOCK_SIZE_SH;
+            sh_block[ghost_idx] = image[offset_t + 2 * width];
+
+            //Finally, the bottom-right corner
+            if (threadIdx.x == (BLOCK_SIZE - 1)) {
+                ghost_idx = (threadIdx.y + 1) * BLOCK_SIZE_SH + threadIdx.x + 1;
+                sh_block[ghost_idx] =     image[offset_t + width + 1];
+                sh_block[ghost_idx + 1] = image[offset_t + width + 2];
+                sh_block[ghost_idx + BLOCK_SIZE_SH] = image[offset_t + 2 * width + 1];
+                sh_block[ghost_idx + BLOCK_SIZE_SH + 1] = image[offset_t + 2 * width + 2];
+            }
+        }
+        __syncthreads();
+
+        float gx = gpu_applyFilter(&sh_block[block_idx], BLOCK_SIZE_SH, sobel_x, 3);
+        float gy = gpu_applyFilter(&sh_block[block_idx], BLOCK_SIZE_SH, sobel_y, 3);
+        
+        // Note: The output can be negative or exceed the max. color value
+        // of 255. We compensate this afterwards while storing the file.
+        image_out[offset + (col + 1)] = sqrtf(gx * gx + gy * gy);
+    }
 }
 
 int main(int argc, char **argv)
@@ -353,11 +458,11 @@ int main(int argc, char **argv)
         
         // Launch the GPU version
         gettimeofday(&t[0], NULL);
-        // gpu_grayscale<<<grid, block>>>(bitmap.width, bitmap.height,
-        //                                d_bitmap, d_image_out[0]);
+        gpu_grayscale<<<grid, block>>>(bitmap.width, bitmap.height,
+                                       d_bitmap, d_image_out[0]);
         
-        // cudaMemcpy(image_out[0], d_image_out[0],
-        //            image_size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(image_out[0], d_image_out[0],
+                   image_size * sizeof(float), cudaMemcpyDeviceToHost);
         gettimeofday(&t[1], NULL);
         
         elapsed[1] = get_elapsed(t[0], t[1]);
@@ -377,11 +482,11 @@ int main(int argc, char **argv)
         
         // Launch the GPU version
         gettimeofday(&t[0], NULL);
-        // gpu_gaussian<<<grid, block>>>(bitmap.width, bitmap.height,
-        //                               d_image_out[0], d_image_out[1]);
+        gpu_gaussian<<<grid, block>>>(bitmap.width, bitmap.height,
+                                      d_image_out[0], d_image_out[1]);
         
-        // cudaMemcpy(image_out[1], d_image_out[1],
-        //            image_size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(image_out[1], d_image_out[1],
+                   image_size * sizeof(float), cudaMemcpyDeviceToHost);
         gettimeofday(&t[1], NULL);
         
         elapsed[1] = get_elapsed(t[0], t[1]);
@@ -401,11 +506,11 @@ int main(int argc, char **argv)
         
         // Launch the GPU version
         gettimeofday(&t[0], NULL);
-        // gpu_sobel<<<grid, block>>>(bitmap.width, bitmap.height,
-        //                            d_image_out[1], d_image_out[0]);
+        gpu_sobel<<<grid, block>>>(bitmap.width, bitmap.height,
+                                   d_image_out[1], d_image_out[0]);
         
-        // cudaMemcpy(image_out[0], d_image_out[0],
-        //            image_size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(image_out[0], d_image_out[0],
+                   image_size * sizeof(float), cudaMemcpyDeviceToHost);
         gettimeofday(&t[1], NULL);
         
         elapsed[1] = get_elapsed(t[0], t[1]);
