@@ -16,6 +16,9 @@ set_target_properties(trace PROPERTIES
                             POSITION_INDEPENDENT_CODE ON
                             CUDA_ARCHITECTURES "61")
 target_compile_features(trace PUBLIC cuda_std_17)
+target_compile_options(trace PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:
+                       --generate-line-info
+                       --relocatable-device-code=true>)
 target_include_directories(trace PUBLIC ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(trace PUBLIC ${OpenCV_LIBS})
 

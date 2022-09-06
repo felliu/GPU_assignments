@@ -19,7 +19,7 @@ inline __device__ float3 operator op (const float3& lhs, const float3& rhs) { \
     float3 res; \
     res.x = lhs.x op rhs.x; \
     res.y = lhs.y op rhs.y; \
-    res.y = lhs.z op rhs.z; \
+    res.z = lhs.z op rhs.z; \
     return res; \
 }
 
@@ -42,13 +42,8 @@ inline __device__ float3 operator*(float a, const float3& v) {
     return v * a;
 }
 
-inline __device__ float dot_product(const float3 v1, const float3 v2) {
-    float res = 0.0;
-    res += v1.x * v2.x;
-    res += v1.y * v2.y;
-    res += v1.z * v2.z;
-
-    return res;
+inline __device__ float dot_product(const float3& v1, const float3& v2) {
+    return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
 }
 
 inline __device__ float3 normalize(const float3& v) {
@@ -58,6 +53,19 @@ inline __device__ float3 normalize(const float3& v) {
     res.y /= norm;
     res.z /= norm;
 
+    return res;
+}
+
+inline __device__ float3 clip(const float3& v, float lo, float hi) {
+    float3 res = v;
+    if (res.x < lo) res.x = lo;
+    if (res.x > hi) res.x = hi;
+
+    if (res.y < lo) res.y = lo;
+    if (res.y > hi) res.x = hi;
+
+    if (res.z < lo) res.z = lo;
+    if (res.z > hi) res.z = hi;
     return res;
 }
 

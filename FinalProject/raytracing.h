@@ -5,11 +5,9 @@
 
 struct SceneObject;
 
-struct SceneInfo {
-    //Coordinates of the screen in the scene
-    //(defined by bottom left and top right edge)
-    float screen_edges[4];
+extern __constant__ float d_screen_edges[];
 
+struct SceneInfo {
     //Location of camera in the scene
     float3 camera_pos;
     float3 light_pos;
@@ -37,14 +35,14 @@ struct DeviceImage {
     int width, height;
 
     __device__ void set_color(int x, int y, float3 col) {
-        pixels[y * width + height].x = col.x;
-        pixels[y * width + height].y = col.y;
-        pixels[y * width + height].z = col.z;
+        pixels[(height - y - 1) * width + x].x = col.x;
+        pixels[(height - y - 1) * width + x].y = col.y;
+        pixels[(height - y - 1) * width + x].z = col.z;
     }
 };
 
 
-__global__ void trace_rays(const SceneInfo& scene,
+__global__ void trace_rays(SceneInfo scene,
                            int n_objects, SceneObject** objects,
                            DeviceImage img);
 #endif
